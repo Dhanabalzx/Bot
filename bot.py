@@ -46,9 +46,8 @@ def send_telegram_message(message):
 
 def format_message():
     banknifty = get_banknifty()
-    return f"🔔 Market Update:
+    return f"🔔 Market Update:\n\n{banknifty}"
 
-{banknifty}"
 
 def main():
     while True:
