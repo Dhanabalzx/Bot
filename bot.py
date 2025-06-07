@@ -1,60 +1,75 @@
+import logging
 import os
-import time
-import requests
+import pandas as pd
+import yfinance as yf
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7853206716:AAGMWNSMeNyyS6OjZPujo8nMnqDjWCjo1LY")
-CHAT_ID = os.getenv("CHAT_ID", "771241303")
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 
-def get_banknifty():
-    try:
-        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20BANK"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept": "*/*",
-            "Referer": "https://www.nseindia.com/"
-        }
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        time.sleep(1)
-        response = session.get(url, headers=headers, timeout=5)
+# PRS2 calculation (same as Pine Script logic)
+def calculate_prs2(df, length=30, mult=2):
+    src = (df['High'] + df['Low'] + df['Close']) / 3
+    atr = df['High'].rolling(length).max() - df['Low'].rolling(length).min()
+    atr = atr.rolling(length).mean()
 
-        if response.status_code == 200:
-            data = response.json()
-            for item in data.get("data", []):
-                if item.get("symbol") == "BANKNIFTY":
-                    ltp = item.get("lastPrice")
-                    change = item.get("pChange")
-                    return f"BankNifty: {ltp} ({change}%)"
-            return "BankNifty not found"
+    avg = src.copy()
+    hold_atr = 0.0
+    for i in range(1, len(df)):
+        prev_avg = avg.iloc[i-1]
+        price = src.iloc[i]
+        atr_val = atr.iloc[i] * mult
+
+        if price - prev_avg > atr_val:
+            avg.iloc[i] = prev_avg + atr_val
+        elif prev_avg - price > atr_val:
+            avg.iloc[i] = prev_avg - atr_val
         else:
-            return f"NSE Error: {response.status_code}"
-    except Exception as e:
-        return f"Error fetching BankNifty: {str(e)}"
+            avg.iloc[i] = prev_avg
 
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
-    try:
-        requests.post(url, data=payload)
-    except Exception as e:
-        print(f"Failed to send message: {e}")
+        if avg.iloc[i] != avg.iloc[i-1]:
+            hold_atr = atr_val / 2
 
-def format_message():
-    banknifty = get_banknifty()
-    return f"🔔 Market Update:\n\n{banknifty}"
+    prS2 = avg - hold_atr * 2
+    return prS2
 
+# Get data and check if stock touched PRS2 and bounced
+def check_stock_bounce(ticker):
+    df = yf.download(ticker, period="30d", interval="1d")
+    if len(df) < 30:
+        return False
 
-def main():
-    while True:
-        message = format_message()
-        print(f"Sending: {message}")
-        send_telegram_message(message)
-        time.sleep(900)  # 15 minutes
+    prS2 = calculate_prs2(df)
+    if df['Low'].iloc[-1] <= prS2.iloc[-1] and df['Close'].iloc[-1] > prS2.iloc[-1]:
+        return True
+    return False
 
-if __name__ == "__main__":
-    main()
+# Telegram /check command
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Checking Nifty 500 stocks...")
+    
+    nifty_500 = ["TCS.NS", "INFY.NS", "RELIANCE.NS", "HDFCBANK.NS"]  # Sample — add full Nifty 500 list
+    matched = []
+
+    for ticker in nifty_500:
+        try:
+            if check_stock_bounce(ticker):
+                matched.append(ticker)
+        except Exception as e:
+            logging.warning(f"Error checking {ticker}: {e}")
+
+    if matched:
+        await update.message.reply_text("📈 Stocks bouncing at PRS2:\n" + "\n".join(matched))
+    else:
+        await update.message.reply_text("❌ No stocks touched PRS2 today.")
+
+# Bot entry point
+if __name__ == '__main__':
+    TOKEN = os.environ.get("BOT_TOKEN")
+    if not TOKEN:
+        raise Exception("BOT_TOKEN not found in environment")
+
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("check", check))
+    app.run_polling()
